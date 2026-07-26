@@ -1,0 +1,8 @@
+# Local runtime config & state
+config.json
+
+# OS and Editor temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
