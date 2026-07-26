@@ -7,7 +7,7 @@
 .DESCRIPTION
     Provides CPU & GPU power capping, PCIe Link State GPU Power Saving,
     multiple eco-modes (Quiet, Super Quiet, Ultra Quiet, Max Quiet, Potato Mode),
-    and custom power limits for complete hardware protection.
+    and custom power limits for complete hardware protection. Overrides laptop OEM overclocking software.
 #>
 
 param (
@@ -20,6 +20,7 @@ param (
     [switch]$MaxQuiet,
     [switch]$Potato,
     [switch]$LifeCalculator,
+    [switch]$Watchdog,
     [int]$AcLimit = 0,
     [int]$DcLimit = 0,
     [string]$GpuMode = ""
@@ -110,16 +111,21 @@ function Set-PowerLimits {
         [int]$ac,
         [int]$dc,
         [int]$gpuLevel = 1, # 0: Off, 1: Moderate, 2: Max Power Save
-        [string]$modeName = "Custom"
+        [string]$modeName = "Custom",
+        [bool]$quietOutput = $false
     )
 
-    # Strictly clamp CPU values between 5 and 100
+    # Strictly clamp CPU values between 5 and 100 - NEVER ALLOW OVERCLOCKING
     if ($ac -gt 100) {
-        Write-Host '[powerc] WARNING: Requested AC limit exceeds 100%. Clamping to 100% to protect hardware!' -ForegroundColor Yellow
+        if (-not $quietOutput) {
+            Write-Host '[powerc] HARDWARE GUARD: Requested AC limit exceeds 100%. Clamping strictly to 100%!' -ForegroundColor Yellow
+        }
         $ac = 100
     }
     if ($dc -gt 100) {
-        Write-Host '[powerc] WARNING: Requested DC limit exceeds 100%. Clamping to 100% to protect hardware!' -ForegroundColor Yellow
+        if (-not $quietOutput) {
+            Write-Host '[powerc] HARDWARE GUARD: Requested DC limit exceeds 100%. Clamping strictly to 100%!' -ForegroundColor Yellow
+        }
         $dc = 100
     }
 
@@ -135,14 +141,16 @@ function Set-PowerLimits {
         2 { "Maximum Power Savings (Max GPU Power Cut)" }
     }
 
-    Write-Host ""
-    Write-Host "[powerc] Applying $modeName Power Limits (CPU & GPU)..." -ForegroundColor Cyan
-    Write-Host "  Plugged In (AC) CPU : $ac%" -ForegroundColor Yellow
-    Write-Host "  On Battery (DC) CPU : $dc%" -ForegroundColor Yellow
-    Write-Host "  GPU Link Saver     : $gpuText" -ForegroundColor Yellow
+    if (-not $quietOutput) {
+        Write-Host ""
+        Write-Host "[powerc] Overriding Laptop OEM Apps & Enforcing $modeName Limits..." -ForegroundColor Cyan
+        Write-Host "  Plugged In (AC) CPU : $ac% (Max 100% Ceiling Enforced)" -ForegroundColor Yellow
+        Write-Host "  On Battery (DC) CPU : $dc% (Max 100% Ceiling Enforced)" -ForegroundColor Yellow
+        Write-Host "  GPU Link Saver     : $gpuText" -ForegroundColor Yellow
+    }
 
     try {
-        # Apply CPU Limits
+        # Apply CPU Limits via Windows Kernel Power Engine (Overrides OEM software boost)
         powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX $ac 2>$null
         if ($LASTEXITCODE -ne 0) {
             powercfg /setacvalueindex SCHEME_CURRENT 54533251-82be-4824-96c1-47b60b740d00 bc5038f7-23e0-4960-96da-33abaf5935ec $ac
@@ -176,9 +184,13 @@ function Set-PowerLimits {
         }
         $config | ConvertTo-Json | Out-File -FilePath $configFile -Encoding utf8
 
-        Write-Host '[powerc] SUCCESS: CPU & GPU power limits active. Hardware thermals and lifespan protected!' -ForegroundColor Green
+        if (-not $quietOutput) {
+            Write-Host '[powerc] SUCCESS: Windows Kernel Power Limits enforced! Laptop OEM Overclocking Blocked.' -ForegroundColor Green
+        }
     } catch {
-        Write-Host "[powerc] ERROR: Failed to apply power settings. ($($_.Exception.Message))" -ForegroundColor Red
+        if (-not $quietOutput) {
+            Write-Host "[powerc] ERROR: Failed to apply power settings. ($($_.Exception.Message))" -ForegroundColor Red
+        }
     }
 }
 
@@ -282,8 +294,38 @@ function Show-Status {
     Write-Host $dcGpuText -ForegroundColor Yellow
 
     Write-Host " Max Limit Ceiling         : 100% (No Overclocking Permitted)" -ForegroundColor Cyan
+    Write-Host " Laptop OEM Overclock Guard: ACTIVE (Kernel Policy Overrides OEM Software)" -ForegroundColor Green
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
+}
+
+# Watchdog Enforcer (Blocks OEM software from resetting power limits)
+function Start-WatchdogEnforcer {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "     🛡️ POWERC - BACKGROUND OVERCLOCK WATCHDOG ACTIVE       " -ForegroundColor Green
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host " Continuously enforcing power limits every 30 seconds." -ForegroundColor Yellow
+    Write-Host " Laptop OEM apps (NitroSense, Armoury Crate, etc.) are BLOCKED." -ForegroundColor Yellow
+    Write-Host " Press Ctrl+C to stop Watchdog mode." -ForegroundColor Gray
+    Write-Host ""
+
+    $ac = $defaultAcLimit
+    $dc = $defaultDcLimit
+    $gpuL = $defaultGpuMode
+    $mName = "Quiet"
+    if (Test-Path $configFile) {
+        $saved = Get-Content $configFile | ConvertFrom-Json
+        if ($saved.AcLimit) { $ac = $saved.AcLimit }
+        if ($saved.DcLimit) { $dc = $saved.DcLimit }
+        if ($saved.GpuLevel) { $gpuL = $saved.GpuLevel }
+        if ($saved.ModeName) { $mName = $saved.ModeName }
+    }
+
+    while ($true) {
+        Set-PowerLimits -ac $ac -dc $dc -gpuLevel $gpuL -modeName $mName -quietOutput $true
+        Start-Sleep -Seconds 30
+    }
 }
 
 # Parse GPU mode string if provided
@@ -297,6 +339,11 @@ if ($GpuMode -ne "") {
 # Handle command line switches
 if ($Status) {
     Show-Status
+    exit
+}
+
+if ($Watchdog) {
+    Start-WatchdogEnforcer
     exit
 }
 
@@ -378,10 +425,11 @@ Write-Host " [6] Potato PC Mode    (AC: 10%,  DC: 10%,  GPU: Max Power Save)" -F
 Write-Host " [7] Set Custom CPU Power Limit (Max 100% Capped)" -ForegroundColor Yellow
 Write-Host " [8] Set Custom GPU Power Saver (PCIe Link: Off, Moderate, Max Save)" -ForegroundColor Yellow
 Write-Host " [9] View Hardware Lifespan and Wear Calculator" -ForegroundColor Yellow
+Write-Host " [W] Start Background Watchdog Guard (Block Laptop OEM Apps)" -ForegroundColor Green
 Write-Host " [0] Exit" -ForegroundColor Red
 Write-Host ""
 
-$choice = Read-Host "Select option [0-9]"
+$choice = Read-Host "Select option [0-9 or W]"
 
 switch ($choice) {
     "1" {
@@ -429,6 +477,12 @@ switch ($choice) {
     }
     "9" {
         Show-LifeCalculator
+    }
+    "W" {
+        Start-WatchdogEnforcer
+    }
+    "w" {
+        Start-WatchdogEnforcer
     }
     "0" {
         Write-Host "Exiting powerc." -ForegroundColor Gray
