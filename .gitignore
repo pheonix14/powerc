@@ -1,7 +1,8 @@
 # Local runtime config & state
 config.json
 
-# OS and Editor temporary files
+# Generated diagnostic reports & metadata
+*.html
 *.tmp
 *.log
 .DS_Store
